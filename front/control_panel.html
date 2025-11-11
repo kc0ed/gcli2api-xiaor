@@ -2687,6 +2687,26 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 emailInfo = `<div class="cred-email" style="font-size: 12px; color: #999; margin-top: 2px; font-style: italic;">未获取邮箱</div>`;
             }
 
+            // 新增：周期和重置时间显示
+            let cycleInfo = '';
+            if (status.next_reset_timestamp) {
+                const resetDate = new Date(status.next_reset_timestamp * 1000);
+                const timeRemaining = resetDate - new Date();
+                let timeRemainingStr = '';
+                if (timeRemaining > 0) {
+                    const hours = Math.floor(timeRemaining / (1000 * 60 * 60));
+                    const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+                    timeRemainingStr = ` (剩余 ${hours}h ${minutes}m)`;
+                }
+                cycleInfo = `
+                    <div style="font-size: 11px; color: #666; margin-top: 4px;">
+                        <span>周期重置: ${resetDate.toLocaleString()}</span>
+                        <span style="color: #007bff;">${timeRemainingStr}</span>
+                    </div>
+                `;
+            }
+
+
             div.innerHTML = `
                 <div class="cred-header">
                     <div style="display: flex; align-items: center; gap: 10px;">
@@ -2698,7 +2718,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     </div>
                     <div class="cred-status">${statusBadges}</div>
                 </div>
-                <div class="cred-actions">${actionButtons}</div>
+                ${cycleInfo}
+                <div class="cred-actions" style="margin-top: 10px;">${actionButtons}</div>
                 <div class="cred-details" id="details-${pathId}">
                     <div class="cred-content"></div>
                 </div>
