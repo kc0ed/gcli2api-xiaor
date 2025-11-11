@@ -3593,14 +3593,49 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
 
             // 格式化时间
-            function formatTime(isoString) {
-                if (!isoString) return '未知';
+            function formatTime(timestamp) {
+                if (!timestamp) return '未知';
                 try {
-                    const date = new Date(isoString);
-                    return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+                    // 时间戳是秒，需要乘以1000
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-');
                 } catch (e) {
                     return '格式错误';
                 }
+            }
+
+            // 新增：周期和重置时间显示
+            let cycleInfo = '';
+            const resetTimestamp = stats.next_reset_timestamp;
+            const startTimestamp = stats.first_use_timestamp;
+
+            if (resetTimestamp) {
+                const resetDate = new Date(resetTimestamp * 1000);
+                const timeRemaining = resetDate - new Date();
+                let timeRemainingStr = '';
+                if (timeRemaining > 0) {
+                    const hours = Math.floor(timeRemaining / (1000 * 60 * 60));
+                    const minutes = Math.floor((timeRemaining % (1000 * 60 * 60)) / (1000 * 60));
+                    timeRemainingStr = ` (剩余 ${hours}h ${minutes}m)`;
+                }
+                
+                cycleInfo = `
+                    <div class="usage-info-item">
+                        <span class="usage-info-label">周期开始</span>
+                        <span class="usage-info-value">${formatTime(startTimestamp)}</span>
+                    </div>
+                    <div class="usage-info-item">
+                        <span class="usage-info-label">周期重置</span>
+                        <span class="usage-info-value">${formatTime(resetTimestamp)}<span style="color: #007bff;">${timeRemainingStr}</span></span>
+                    </div>
+                `;
+            } else {
+                 cycleInfo = `
+                    <div class="usage-info-item" style="grid-column: 1 / -1;">
+                        <span class="usage-info-label">下次重置时间</span>
+                        <span class="usage-info-value">${formatTime(stats.next_reset_time)}</span>
+                    </div>
+                `;
             }
 
             div.innerHTML = `
@@ -3629,10 +3664,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 </div>
                 
                 <div class="usage-info">
-                    <div class="usage-info-item" style="grid-column: 1 / -1;">
-                        <span class="usage-info-label">下次重置时间</span>
-                        <span class="usage-info-value">${formatTime(stats.next_reset_time)}</span>
-                    </div>
+                    ${cycleInfo}
                 </div>
                 
                 <div class="usage-actions">
