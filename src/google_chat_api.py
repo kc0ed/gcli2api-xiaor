@@ -43,13 +43,26 @@ def _create_error_response(message: str, status_code: int = 500) -> Response:
         media_type="application/json"
     )
 
-async def _handle_api_error(credential_manager: CredentialManager, status_code: int, response_content: str = ""):
-    """Handle API errors by rotating credentials when needed. Error recording should be done before calling this function."""
+async def _handle_api_error(credential_manager: CredentialManager, status_code: int, response_content: str = "", current_file: str = None):
+    """
+    Handle API errors by updating credential state and rotating when needed.
+    Error recording should be done before calling this function.
+    """
+    # 429: 将当前凭证标记为限流 + 轮换
     if status_code == 429 and credential_manager:
         if response_content:
             log.error(f"Google API returned status 429 - quota exhausted. Response details: {response_content[:500]}")
         else:
             log.error("Google API returned status 429 - quota exhausted, switching credentials")
+        
+        # 标记当前凭证进入限流状态（从可用池中排除）
+        if current_file:
+            try:
+                await credential_manager.mark_rate_limited(current_file, True)
+            except Exception as e:
+                log.error(f"Failed to mark credential {current_file} as rate-limited: {e}")
+        
+        # 轮换到下一个凭证（如果有）
         await credential_manager.force_rotate_credential()
     
     # 处理自动封禁的错误码
@@ -225,8 +238,8 @@ async def send_gemini_request(payload: dict, is_streaming: bool = False, credent
                             pass
                         await client.aclose()
                         
-                        # 处理凭证轮换
-                        await _handle_api_error(credential_manager, resp.status_code, response_content)
+                        # 处理凭证轮换与状态更新（包含429限流标记）
+                        await _handle_api_error(credential_manager, resp.status_code, response_content, current_file)
                         
                         # 返回错误流
                         async def error_stream():
@@ -279,9 +292,15 @@ async def send_gemini_request(payload: dict, is_streaming: bool = False, credent
                             continue
                         else:
                             log.error(f"[RETRY] Max retries exceeded for 429 error")
+                            # 将当前凭证标记为限流，避免后续选择它
+                            if credential_manager and current_file:
+                                try:
+                                    await credential_manager.mark_rate_limited(current_file, True)
+                                except Exception as e:
+                                    log.error(f"Failed to mark credential {current_file} as rate-limited after max 429 retries: {e}")
                             return _create_error_response("429 rate limit exceeded, max retries reached", 429)
                     else:
-                        # 非429错误或成功响应，正常处理
+                        # 非429错误或成功响应，正常处理（内部会调用 _handle_api_error 处理非200）
                         return await _handle_non_streaming_response(resp, credential_manager, payload.get("model", ""), current_file)
                     
         except Exception as e:
@@ -339,7 +358,7 @@ def _handle_streaming_response_managed(resp, stream_ctx, client, credential_mana
             if credential_manager and current_file:
                 await credential_manager.record_api_call_result(current_file, False, resp.status_code)
             
-            await _handle_api_error(credential_manager, resp.status_code, response_content)
+            await _handle_api_error(credential_manager, resp.status_code, response_content, current_file)
             
             error_response = {
                 "error": {

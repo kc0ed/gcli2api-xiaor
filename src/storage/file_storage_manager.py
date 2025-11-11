@@ -64,7 +64,8 @@ class FileStorageManager:
     STATE_FIELDS = {
         "error_codes", "disabled", "last_success", "user_email",
         "gemini_2_5_pro_calls", "total_calls", "next_reset_time",
-        "daily_limit_gemini_2_5_pro", "daily_limit_total"
+        "daily_limit_gemini_2_5_pro", "daily_limit_total",
+        "first_use_timestamp", "next_reset_timestamp", "is_rate_limited"
     }
     
     # 默认状态数据模板（不包含动态值）
@@ -76,7 +77,10 @@ class FileStorageManager:
         "total_calls": 0,
         "next_reset_time": None,
         "daily_limit_gemini_2_5_pro": 100,
-        "daily_limit_total": 1000
+        "daily_limit_total": 1000,
+        "first_use_timestamp": None,
+        "next_reset_timestamp": None,
+        "is_rate_limited": False
     }
     
     @classmethod
