@@ -104,20 +104,28 @@ class CredentialManager:
             )
     
     async def _background_worker(self):
-        """后台工作线程，处理定期任务"""
+        """
+        后台工作线程，处理定期任务：
+        - 定期重新发现可用凭证（热更新）
+        - 自动恢复达到重置时间的限流凭证（24小时滚动窗口解封）
+        """
+        RECOVER_INTERVAL = 60  # 秒，检查频率，适中即可
         try:
             while not self._shutdown_event.is_set():
                 try:
-                    # 每60秒检查一次凭证更新
-                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=60.0)
+                    # 等待一段时间或直到收到关闭信号
+                    await asyncio.wait_for(self._shutdown_event.wait(), timeout=RECOVER_INTERVAL)
                     if self._shutdown_event.is_set():
                         break
 
-                    # 重新发现凭证（热更新）
+                    # 1) 重新发现可用凭证（处理新增/删除/禁用）
                     await self._discover_credentials()
 
+                    # 2) 自动恢复已过期的限流凭证
+                    await self._recover_rate_limited_credentials()
+
                 except asyncio.TimeoutError:
-                    # 超时是正常的，继续下一轮
+                    # 正常超时，进入下一轮循环
                     continue
                 except asyncio.CancelledError:
                     # 任务被取消，正常退出
@@ -154,7 +162,7 @@ class CredentialManager:
                             normalized_name = self._storage_adapter._backend._normalize_filename(credential_name)
                         
                         state = all_states.get(normalized_name, {})
-                        if not state.get("disabled", False):
+                        if not state.get("disabled", False) and not state.get("is_rate_limited", False):
                             available_credentials.append(credential_name)
                 except Exception as e:
                     log.warning(f"Failed to batch load credential states, falling back to individual checks: {e}")
@@ -162,7 +170,7 @@ class CredentialManager:
                     for credential_name in all_credentials:
                         try:
                             state = await self._storage_adapter.get_credential_state(credential_name)
-                            if not state.get("disabled", False):
+                            if not state.get("disabled", False) and not state.get("is_rate_limited", False):
                                 available_credentials.append(credential_name)
                         except Exception as e2:
                             log.warning(f"Failed to check state for credential {credential_name}: {e2}")
@@ -279,6 +287,8 @@ class CredentialManager:
                     # 加载当前凭证
                     result = await self._load_current_credential()
                     if result:
+                        # 检查并更新24小时使用周期
+                        await self._check_and_update_usage_cycle(self._current_credential_file, self._current_credential_state)
                         return result
                     
                     # 当前凭证加载失败，标记为失效并切换到下一个
@@ -395,6 +405,120 @@ class CredentialManager:
         except Exception as e:
             log.error(f"Error getting credential statuses: {e}")
             return {}
+
+    async def _check_and_update_usage_cycle(self, credential_name: str, credential_state: Dict[str, Any]):
+        """
+        检查并更新凭证的24小时使用周期。
+
+        逻辑：
+        - 如果没有周期信息，或当前时间超过 next_reset_timestamp：
+          - 启动/重置一个24小时窗口，从“当前调用”算起。
+        """
+        now = time.time()
+        next_reset = credential_state.get("next_reset_timestamp")
+
+        # 没有周期信息或已过期 -> 开新周期
+        if next_reset is None or now > next_reset:
+            updates = {
+                "first_use_timestamp": now,
+                "next_reset_timestamp": now + 24 * 3600,
+                # 调用计数交给上层使用统计模块，这里只提供安全重置
+            }
+            await self.update_credential_state(credential_name, updates)
+            # 同步当前缓存（如果这是当前凭证）
+            if credential_name == self._current_credential_file:
+                self._current_credential_state.update(updates)
+            log.info(f"凭证 {credential_name} 启动新的24小时周期: first_use={now}, next_reset={updates['next_reset_timestamp']}")
+
+    async def _recover_rate_limited_credentials(self):
+        """
+        自动恢复已达重置时间的限流凭证。
+
+        策略：
+        - 对 is_rate_limited=True 的凭证：
+          - 如果 next_reset_timestamp 存在且当前时间 >= next_reset_timestamp：
+            - 直接解除限流标记，并重置周期起点为当前时间。
+        - 不主动打真实API探测请求，避免额外配额消耗，由后续正常请求自然验证。
+        """
+        try:
+            if not self._storage_adapter:
+                return
+
+            all_states = await self._storage_adapter.get_all_credential_states()
+            now = time.time()
+            updates_batch = {}
+
+            for name, state in all_states.items():
+                if not state.get("is_rate_limited"):
+                    continue
+
+                next_reset_ts = state.get("next_reset_timestamp")
+                # 如果没有next_reset_timestamp，按保守策略：给它补一个24h窗口再等一轮
+                if next_reset_ts is None:
+                    continue
+
+                if now >= float(next_reset_ts):
+                    # 到点自动解封
+                    updates_batch[name] = {
+                        "is_rate_limited": False,
+                        "first_use_timestamp": now,
+                        "next_reset_timestamp": now + 24 * 3600,
+                    }
+
+            # 批量更新
+            for name, updates in updates_batch.items():
+                await self.update_credential_state(name, updates)
+                log.info(f"自动恢复限流凭证 {name}，启动新的24小时周期。")
+
+            # 若有恢复，重新发现可用凭证
+            if updates_batch:
+                await self._discover_credentials()
+
+        except Exception as e:
+            log.error(f"Error while recovering rate-limited credentials: {e}")
+
+    async def mark_rate_limited(self, credential_name: str, is_limited: bool):
+        """
+        标记凭证的速率限制状态。
+
+        - is_limited=True: 标记为限流，_discover_credentials 会将其从可用池中剔除。
+        - is_limited=False: 手动解除限流（通常由自动恢复逻辑或管理员操作触发）。
+        """
+        try:
+            state_updates = {"is_rate_limited": is_limited}
+
+            # 如果是设置为限流且当前没有24h窗口，则从现在起设置一个窗口，方便恢复逻辑判断
+            if is_limited:
+                now = time.time()
+                if self._current_credential_state.get("next_reset_timestamp") is None or credential_name != self._current_credential_file:
+                    # 谨慎：单独读该凭证的状态，避免引用错误
+                    try:
+                        state = await self._storage_adapter.get_credential_state(credential_name)
+                    except Exception:
+                        state = {}
+                    if state.get("next_reset_timestamp") is None:
+                        state_updates["first_use_timestamp"] = now
+                        state_updates["next_reset_timestamp"] = now + 24 * 3600
+
+            success = await self.update_credential_state(credential_name, state_updates)
+            
+            if success:
+                action = "marked as rate-limited" if is_limited else "cleared from rate-limit"
+                log.info(f"Credential {credential_name} {action}.")
+                
+                # 立即刷新可用凭证列表
+                await self._discover_credentials()
+                
+                # 如果是当前凭证被限制，立即轮换
+                if is_limited and credential_name == self._current_credential_file:
+                    log.info(f"Current credential {credential_name} is rate-limited, forcing rotation.")
+                    await self.force_rotate_credential()
+            
+            return success
+                
+        except Exception as e:
+            log.error(f"Error marking rate limit for {credential_name}: {e}")
+            return False
     
     async def get_or_fetch_user_email(self, credential_name: str) -> Optional[str]:
         """获取或获取用户邮箱地址"""
