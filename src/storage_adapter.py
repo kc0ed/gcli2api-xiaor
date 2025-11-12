@@ -81,6 +81,14 @@ class StorageBackend(Protocol):
         """获取所有使用统计"""
         ...
 
+    async def archive_and_delete_credential(self, filename: str) -> bool:
+        """归档统计数据然后删除凭证"""
+        ...
+
+    async def get_deleted_stats(self) -> Dict[str, int]:
+        """获取已删除凭证的累计统计"""
+        ...
+
 
 
 
@@ -243,6 +251,26 @@ class StorageAdapter:
         """获取所有使用统计"""
         self._ensure_initialized()
         return await self._backend.get_all_usage_stats()
+
+    async def archive_and_delete_credential(self, filename: str) -> bool:
+        """归档并删除凭证"""
+        self._ensure_initialized()
+        if hasattr(self._backend, 'archive_and_delete_credential'):
+            return await self._backend.archive_and_delete_credential(filename)
+        # Fallback for older backends
+        log.warning("Storage backend does not support archive_and_delete_credential, falling back to hard delete.")
+        return await self._backend.delete_credential(filename)
+
+    async def get_deleted_stats(self) -> Dict[str, int]:
+        """获取已删除凭证的累计统计"""
+        self._ensure_initialized()
+        if hasattr(self._backend, 'get_deleted_stats'):
+            return await self._backend.get_deleted_stats()
+        return {
+            "total_gemini_2_5_pro_calls": 0,
+            "total_all_model_calls": 0,
+            "total_deleted_credentials": 0,
+        }
     
     # ============ 工具方法 ============
     

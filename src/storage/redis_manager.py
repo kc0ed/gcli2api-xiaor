@@ -83,6 +83,7 @@ class RedisManager:
         # 哈希表设计 - 所有凭证存在一个哈希表中
         self._credentials_hash_name = "gcli2api:credentials"
         self._config_hash_name = "gcli2api:config"
+        self._deleted_stats_key = "gcli2api:deleted_stats" # 用于存储已删除凭证的累计统计
         
         # 性能监控
         self._operation_count = 0
@@ -192,7 +193,7 @@ class RedisManager:
             "gemini_2_5_pro_calls": 0,
             "total_calls": 0,
             "next_reset_time": None,
-            "daily_limit_gemini_2_5_pro": 100,
+            "daily_limit_gemini_2_5_pro": 150,
             "daily_limit_total": 1000
         }
     
@@ -293,6 +294,43 @@ class RedisManager:
             log.error(f"Error deleting credential {filename} in {operation_time:.3f}s: {e}")
             return False
     
+    async def archive_and_delete_credential(self, filename: str) -> bool:
+        """归档统计数据然后删除凭证"""
+        self._ensure_initialized()
+        start_time = time.time()
+        
+        try:
+            # 1. 获取要删除的凭证的统计数据
+            credential_entry = await self._credentials_cache_manager.get(filename)
+            if not credential_entry or "stats" not in credential_entry:
+                # 如果没有统计数据，直接删除
+                return await self.delete_credential(filename)
+
+            stats_to_archive = credential_entry["stats"]
+            gemini_calls = stats_to_archive.get("gemini_2_5_pro_calls", 0)
+            total_calls = stats_to_archive.get("total_calls", 0)
+
+            # 2. 原子化更新已删除凭证的累计统计
+            if gemini_calls > 0 or total_calls > 0:
+                pipe = self._client.pipeline()
+                pipe.hincrby(self._deleted_stats_key, "total_gemini_2_5_pro_calls", gemini_calls)
+                pipe.hincrby(self._deleted_stats_key, "total_all_model_calls", total_calls)
+                pipe.hincrby(self._deleted_stats_key, "total_deleted_credentials", 1)
+                await pipe.execute()
+                log.info(f"Archived stats for {filename}: Gemini {gemini_calls}, Total {total_calls}")
+
+            # 3. 从缓存和Redis中删除凭证
+            success = await self._credentials_cache_manager.delete(filename)
+            
+            operation_time = time.time() - start_time
+            log.debug(f"Archived and deleted credential {filename} in {operation_time:.3f}s")
+            return success
+
+        except Exception as e:
+            operation_time = time.time() - start_time
+            log.error(f"Error archiving and deleting credential {filename} in {operation_time:.3f}s: {e}")
+            return False
+
     # ============ 状态管理 ============
     
     async def update_credential_state(self, filename: str, state_updates: Dict[str, Any]) -> bool:
@@ -502,3 +540,21 @@ class RedisManager:
             operation_time = time.time() - start_time
             log.error(f"Error getting all usage stats in {operation_time:.3f}s: {e}")
             return {}
+
+    async def get_deleted_stats(self) -> Dict[str, int]:
+        """获取已删除凭证的累计统计"""
+        self._ensure_initialized()
+        try:
+            deleted_stats = await self._client.hgetall(self._deleted_stats_key)
+            return {
+                "total_gemini_2_5_pro_calls": int(deleted_stats.get("total_gemini_2_5_pro_calls", 0)),
+                "total_all_model_calls": int(deleted_stats.get("total_all_model_calls", 0)),
+                "total_deleted_credentials": int(deleted_stats.get("total_deleted_credentials", 0)),
+            }
+        except Exception as e:
+            log.error(f"Error getting deleted stats: {e}")
+            return {
+                "total_gemini_2_5_pro_calls": 0,
+                "total_all_model_calls": 0,
+                "total_deleted_credentials": 0,
+            }

@@ -1287,6 +1287,32 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 </div>
                 <div id="usagePeriod" class="status info" style="text-align: center; margin-top: 15px; display: none;"></div>
 
+                <!-- 已删除凭证统计 -->
+                <div id="deletedStatsContainer" class="config-group" style="display: none; border-left: 4px solid #6c757d;">
+                    <h4 style="cursor: pointer; user-select: none;" onclick="toggleDeletedStats()">
+                        已删除凭证的历史累计统计
+                        <span id="deletedStatsToggleIcon" style="float: right; transition: transform 0.3s;">▶</span>
+                    </h4>
+                    <div id="deletedStatsContent" class="hidden" style="margin-top: 15px;">
+                        <div class="stats-container">
+                            <div class="stat-item disabled">
+                                <span class="stat-number" id="deletedTotalFiles">0</span>
+                                <span class="stat-label">已删除凭证总数</span>
+                            </div>
+                            <div class="stat-item disabled" style="border-left-color: #ff6b35;">
+                                <span class="stat-number" id="deletedGemini25Pro">0</span>
+                                <span class="stat-label">Gemini 2.5 Pro 调用</span>
+                            </div>
+                            <div class="stat-item disabled" style="border-left-color: #007bff;">
+                                <span class="stat-number" id="deletedAllModels">0</span>
+                                <span class="stat-label">所有模型总调用</span>
+                            </div>
+                        </div>
+                        <p class="config-note" style="text-align: center;">注意：此为历史累计数据，不参与当前周期的平均值计算。</p>
+                    </div>
+                </div>
+
+
                 <!-- 文件使用统计列表 -->
                 <div id="usageListSection">
                     <div class="loading" id="usageLoading">正在加载使用统计...</div>
@@ -1301,7 +1327,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         <ul>
                             <li><strong>Gemini 2.5 Pro 调用次数：</strong>仅统计 gemini-2.5-pro 及其变体模型的成功调用</li>
                             <li><strong>所有模型调用次数：</strong>统计所有模型的成功调用总数</li>
-                            <li><strong>每日配额：</strong>默认每日配额 Gemini 2.5 Pro: 100次，所有模型: 1000次</li>
+                            <li><strong>每日配额：</strong>默认每日配额 Gemini 2.5 Pro: 150次，所有模型: 1000次</li>
                             <li><strong>配额重置：</strong>按每个凭证首次调用时间 24h 滚动重置</li>
                             <li><strong>日切时间：</strong>每日 06:00（UTC）起算新的展示周期；如需修改，请在环境变量设置 <code>DAILY_RESET_HOUR</code>，次日生效</li>
                         </ul>
@@ -1623,8 +1649,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     </p>
                     <div style="margin: 15px 0;">
                         <p style="margin: 5px 0;"><strong>🔗 项目地址：</strong> <a
-                                href="https://github.com/su-kaka/gcli2api" target="_blank"
-                                style="color: #007bff; text-decoration: none;">GitHub - su-kaka/gcli2api</a></p>
+                                href="https://github.com/kc0ed/gcli2api-xiaor" target="_blank"
+                                style="color: #007bff; text-decoration: none;">GitHub - kc0ed/gcli2api-xiaor</a></p>
                         <p style="margin: 5px 0;"><strong>⚠️ 使用声明：</strong> <span
                                 style="color: #dc3545; font-weight: 500;">禁止商业用途和倒卖 - 仅供学习使用</span></p>
                     </div>
@@ -1648,22 +1674,6 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     </div>
                 </div>
 
-                <!-- 支持项目 -->
-                <div
-                    style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 15px; margin: 30px 0; text-align: center; box-shadow: 0 8px 32px rgba(102, 126, 234, 0.3);">
-                    <h4 style="margin: 0 0 15px 0; font-size: 24px; font-weight: 600;">💝 支持项目发展</h4>
-                    <p style="margin: 0 0 25px 0; font-size: 16px; opacity: 0.9; line-height: 1.6;">
-                        如果这个项目对您有帮助，欢迎通过币安扫码捐赠支持项目的持续发展！<br>
-                        您的每一份支持都是我们前进的动力 ❤️
-                    </p>
-
-                    <div
-                        style="display: inline-block; background: white; padding: 20px; border-radius: 15px; box-shadow: 0 4px 25px rgba(0,0,0,0.1);">
-                        <img src="docs/币安.jpg" alt="币安捐赠二维码"
-                            style="width: 200px; height: 200px; border-radius: 10px; display: block;">
-                        <p style="color: #666; margin: 12px 0 0 0; font-size: 14px; font-weight: 600;">扫码币安捐赠</p>
-                    </div>
-                </div>
 
                 <!-- 联系和反馈 -->
                 <div
@@ -1684,8 +1694,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             <div
                 style="background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 8px; padding: 12px; margin-top: 30px; text-align: center; border-left: 4px solid #007bff;">
                 <p style="margin: 5px 0; font-size: 14px; color: #495057;">GitHub: <a
-                        href="https://github.com/su-kaka/gcli2api" target="_blank"
-                        style="color: #007bff; text-decoration: none;">https://github.com/su-kaka/gcli2api</a></p>
+                        href="https://github.com/kc0ed/gcli2api-xiaor" target="_blank"
+                        style="color: #007bff; text-decoration: none;">https://github.com/kc0ed/gcli2api-xiaor</a></p>
                 <p style="margin: 5px 0; font-size: 14px; color: #dc3545; font-weight: 500;">⚠️ 禁止商业用途和倒卖 - 仅供学习使用 ⚠️
                 </p>
             </div>
@@ -3583,20 +3593,16 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 usageLoading.style.display = 'block';
                 usageList.innerHTML = '';
 
-                // 获取所有文件的使用统计
-                const [statsResponse, aggregatedResponse] = await Promise.all([
-                    fetch('/usage/stats', {
-                        method: 'GET',
-                        headers: getAuthHeaders()
-                    }),
-                    fetch('/usage/aggregated', {
-                        method: 'GET',
-                        headers: getAuthHeaders()
-                    })
+                // 并发获取所有统计数据
+                const [statsResponse, aggregatedResponse, deletedStatsResponse] = await Promise.all([
+                    fetch('/usage/stats', { method: 'GET', headers: getAuthHeaders() }),
+                    fetch('/usage/aggregated', { method: 'GET', headers: getAuthHeaders() }),
+                    fetch('/usage/deleted-stats', { method: 'GET', headers: getAuthHeaders() })
                 ]);
 
                 const statsData = await statsResponse.json();
                 const aggregatedData = await aggregatedResponse.json();
+                const deletedStatsData = await deletedStatsResponse.json();
 
                 if (statsResponse.ok && aggregatedResponse.ok) {
                     usageStatsData = statsData.data;
@@ -3624,6 +3630,21 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 } else {
                     showStatus('加载使用统计失败', 'error');
                 }
+
+                // 更新已删除凭证统计
+                if (deletedStatsResponse.ok && deletedStatsData.success) {
+                    const deletedStats = deletedStatsData.data;
+                    const container = document.getElementById('deletedStatsContainer');
+                    if (deletedStats.total_deleted_credentials > 0) {
+                        document.getElementById('deletedTotalFiles').textContent = deletedStats.total_deleted_credentials;
+                        document.getElementById('deletedGemini25Pro').textContent = deletedStats.total_gemini_2_5_pro_calls;
+                        document.getElementById('deletedAllModels').textContent = deletedStats.total_all_model_calls;
+                        container.style.display = 'block';
+                    } else {
+                        container.style.display = 'none';
+                    }
+                }
+
             } catch (error) {
                 console.error('refreshUsageStats error:', error);
                 showStatus(`网络错误: ${error.message}`, 'error');
@@ -3886,6 +3907,19 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 }
 
                 showStatus('✅ 已切换到官方端点配置，记得点击"保存配置"按钮保存设置', 'success');
+            }
+        }
+    </script>
+    <script>
+        function toggleDeletedStats() {
+            const content = document.getElementById('deletedStatsContent');
+            const icon = document.getElementById('deletedStatsToggleIcon');
+            if (content.classList.contains('hidden')) {
+                content.classList.remove('hidden');
+                icon.style.transform = 'rotate(90deg)';
+            } else {
+                content.classList.add('hidden');
+                icon.style.transform = 'rotate(0deg)';
             }
         }
     </script>

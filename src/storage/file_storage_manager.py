@@ -76,7 +76,7 @@ class FileStorageManager:
         "gemini_2_5_pro_calls": 0,
         "total_calls": 0,
         "next_reset_time": None,
-        "daily_limit_gemini_2_5_pro": 100,
+        "daily_limit_gemini_2_5_pro": 150,
         "daily_limit_total": 1000,
         "first_use_timestamp": None,
         "next_reset_timestamp": None,
@@ -94,6 +94,7 @@ class FileStorageManager:
         self._credentials_dir = None  # 将通过异步初始化设置
         self._state_file = None
         self._config_file = None
+        self._deleted_stats_file = None # 用于存储已删除凭证的累计统计
         self._lock = asyncio.Lock()
         self._initialized = False
         
@@ -114,6 +115,7 @@ class FileStorageManager:
         self._credentials_dir = os.getenv("CREDENTIALS_DIR", "./creds")
         self._state_file = os.path.join(self._credentials_dir, "creds.toml")
         self._config_file = os.path.join(self._credentials_dir, "config.toml")
+        self._deleted_stats_file = os.path.join(self._credentials_dir, "deleted_stats.toml")
         
         # 确保目录存在
         os.makedirs(self._credentials_dir, exist_ok=True)
@@ -359,6 +361,48 @@ class FileStorageManager:
             log.error(f"Error deleting credential {filename}: {e}")
             return False
     
+    async def archive_and_delete_credential(self, filename: str) -> bool:
+        """归档统计数据然后删除凭证"""
+        self._ensure_initialized()
+        
+        try:
+            filename = self._normalize_filename(filename)
+            
+            # 1. 获取统计数据
+            all_data = await self._credentials_cache_manager.get_all()
+            if filename not in all_data:
+                # 如果凭证不存在，直接返回成功
+                return True
+
+            stats_to_archive = {k: v for k, v in all_data[filename].items() if k in {"gemini_2_5_pro_calls", "total_calls"}}
+            gemini_calls = stats_to_archive.get("gemini_2_5_pro_calls", 0)
+            total_calls = stats_to_archive.get("total_calls", 0)
+
+            # 2. 更新已删除凭证的累计统计
+            if gemini_calls > 0 or total_calls > 0:
+                async with self._lock:
+                    deleted_stats = {}
+                    if os.path.exists(self._deleted_stats_file):
+                        async with aiofiles.open(self._deleted_stats_file, "r", encoding="utf-8") as f:
+                            deleted_stats = toml.loads(await f.read())
+                    
+                    deleted_stats["total_gemini_2_5_pro_calls"] = deleted_stats.get("total_gemini_2_5_pro_calls", 0) + gemini_calls
+                    deleted_stats["total_all_model_calls"] = deleted_stats.get("total_all_model_calls", 0) + total_calls
+                    deleted_stats["total_deleted_credentials"] = deleted_stats.get("total_deleted_credentials", 0) + 1
+                    
+                    async with aiofiles.open(self._deleted_stats_file, "w", encoding="utf-8") as f:
+                        await f.write(toml.dumps(deleted_stats))
+                log.info(f"Archived stats for {filename}: Gemini {gemini_calls}, Total {total_calls}")
+
+            # 3. 从缓存和文件中删除凭证
+            success = await self._credentials_cache_manager.delete(filename)
+            log.debug(f"Archived and deleted credential from unified cache: {filename}")
+            return success
+
+        except Exception as e:
+            log.error(f"Error archiving and deleting credential {filename}: {e}")
+            return False
+
     # ============ 状态管理 ============
     
     async def update_credential_state(self, filename: str, state_updates: Dict[str, Any]) -> bool:
@@ -547,6 +591,34 @@ class FileStorageManager:
         except Exception as e:
             log.error(f"Error getting all usage stats: {e}")
             return {}
+
+    async def get_deleted_stats(self) -> Dict[str, int]:
+        """获取已删除凭证的累计统计"""
+        self._ensure_initialized()
+        try:
+            if not os.path.exists(self._deleted_stats_file):
+                return {
+                    "total_gemini_2_5_pro_calls": 0,
+                    "total_all_model_calls": 0,
+                    "total_deleted_credentials": 0,
+                }
+            
+            async with aiofiles.open(self._deleted_stats_file, "r", encoding="utf-8") as f:
+                content = await f.read()
+            
+            deleted_stats = toml.loads(content)
+            return {
+                "total_gemini_2_5_pro_calls": int(deleted_stats.get("total_gemini_2_5_pro_calls", 0)),
+                "total_all_model_calls": int(deleted_stats.get("total_all_model_calls", 0)),
+                "total_deleted_credentials": int(deleted_stats.get("total_deleted_credentials", 0)),
+            }
+        except Exception as e:
+            log.error(f"Error getting deleted stats: {e}")
+            return {
+                "total_gemini_2_5_pro_calls": 0,
+                "total_all_model_calls": 0,
+                "total_deleted_credentials": 0,
+            }
     
     # ============ 工具方法 ============
     

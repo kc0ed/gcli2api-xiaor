@@ -749,8 +749,10 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
         
         log.info(f"Received request: {request}")
         
-        filename = request.filename
         action = request.action
+        
+        # 统一使用basename，确保与前端和存储层一致
+        filename = os.path.basename(request.filename)
         
         log.info(f"Performing action '{action}' on file: {filename}")
         
@@ -782,16 +784,16 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
         
         elif action == "delete":
             try:
-                # 使用存储适配器删除凭证
-                success = await storage_adapter.delete_credential(filename)
+                # 使用新的归档并删除方法
+                success = await storage_adapter.archive_and_delete_credential(filename)
                 if success:
-                    log.info(f"Successfully deleted credential: {filename}")
-                    return JSONResponse(content={"message": f"已删除凭证文件 {os.path.basename(filename)}"})
+                    log.info(f"Successfully archived and deleted credential: {filename}")
+                    return JSONResponse(content={"message": f"已删除凭证文件 {os.path.basename(filename)} 并归档其统计数据"})
                 else:
-                    raise HTTPException(status_code=500, detail="删除凭证失败")
+                    raise HTTPException(status_code=500, detail="归档或删除凭证失败")
             except Exception as e:
-                log.error(f"Error deleting credential {filename}: {e}")
-                raise HTTPException(status_code=500, detail=f"删除文件失败: {str(e)}")
+                log.error(f"Error archiving and deleting credential {filename}: {e}")
+                raise HTTPException(status_code=500, detail=f"归档或删除文件失败: {str(e)}")
         
         else:
             raise HTTPException(status_code=400, detail="无效的操作类型")
@@ -823,8 +825,11 @@ async def creds_batch_action(request: CredFileBatchActionRequest, token: str = D
         # 获取存储适配器
         storage_adapter = await get_storage_adapter()
         
-        for filename in filenames:
+        for raw_filename in filenames:
             try:
+                # 统一使用basename
+                filename = os.path.basename(raw_filename)
+
                 # 验证文件名安全性
                 if not filename.endswith('.json'):
                     errors.append(f"{filename}: 无效的文件类型")
@@ -847,13 +852,13 @@ async def creds_batch_action(request: CredFileBatchActionRequest, token: str = D
                     
                 elif action == "delete":
                     try:
-                        # 使用存储适配器删除凭证
-                        delete_success = await storage_adapter.delete_credential(filename)
+                        # 使用新的归档并删除方法
+                        delete_success = await storage_adapter.archive_and_delete_credential(filename)
                         if delete_success:
                             success_count += 1
-                            log.info(f"Successfully deleted credential in batch: {filename}")
+                            log.info(f"Successfully archived and deleted credential in batch: {filename}")
                         else:
-                            errors.append(f"{filename}: 删除失败")
+                            errors.append(f"{filename}: 归档或删除失败")
                             continue
                     except Exception as e:
                         errors.append(f"{filename}: 删除文件失败 - {str(e)}")
@@ -1734,5 +1739,22 @@ async def reset_usage_statistics(request: UsageResetRequest, token: str = Depend
         
     except Exception as e:
         log.error(f"重置使用统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/usage/deleted-stats")
+async def get_deleted_usage_statistics(token: str = Depends(verify_token)):
+    """
+    获取已删除凭证的累计使用统计信息
+    """
+    try:
+        storage_adapter = await get_storage_adapter()
+        deleted_stats = await storage_adapter.get_deleted_stats()
+        return JSONResponse(content={
+            "success": True,
+            "data": deleted_stats
+        })
+    except Exception as e:
+        log.error(f"获取已删除凭证统计失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

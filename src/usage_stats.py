@@ -225,7 +225,7 @@ class UsageStats:
                 "gemini_2_5_pro_calls": 0,
                 "total_calls": 0,
                 # 不再写入 next_reset_time
-                "daily_limit_gemini_2_5_pro": 100,
+                "daily_limit_gemini_2_5_pro": 150,
                 "daily_limit_total": 1000
             }
             # 若调用处已把 next_reset_time 放进 stats，则保留；否则留空
