@@ -1645,7 +1645,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0; border-left: 4px solid #007bff;">
                     <h4 style="margin-top: 0; color: #007bff;">📋 项目简介</h4>
                     <p style="margin: 10px 0; line-height: 1.6; color: #495057;">
-                        GCLI2API是一个将Google Gemini API转换为OpenAI 和GEMINI API格式的代理工具，支持多账户管理、自动轮换、实时日志监控等功能。
+                        本工具是一个将 Google Gemini API 转换为 OpenAI 和 Gemini API 格式的代理服务，专为多凭证、高可用性场景设计。
                     </p>
                     <div style="margin: 15px 0;">
                         <p style="margin: 5px 0;"><strong>🔗 项目地址：</strong> <a
@@ -1659,17 +1659,32 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 <!-- 功能特性 -->
                 <div
                     style="background-color: #e7f3ff; padding: 20px; border-radius: 10px; margin: 20px 0; border-left: 4px solid #17a2b8;">
-                    <h4 style="margin-top: 0; color: #17a2b8;">✨ 主要功能</h4>
-                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px;">
+                    <h4 style="margin-top: 0; color: #17a2b8;">✨ 核心特性与近期改进</h4>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; color: #0c5460;">
                         <div>
-                            <p><strong>🔄 多账户管理：</strong> 支持批量上传和管理多个Google账户</p>
-                            <p><strong>⚡ 自动轮换：</strong> 智能轮换账户，避免单账户限额</p>
-                            <p><strong>📊 实时监控：</strong> 使用统计、错误监控、实时日志</p>
+                            <p><strong>🔄 多凭证管理:</strong> 支持批量上传、并发认证和统一管理，适配多实例部署。</p>
+                            <p><strong>⚡ 智能轮换与限流:</strong> 基于每个凭证的24小时滚动窗口进行精准限流与自动恢复。</p>
+                            <p><strong>📊 高级使用统计:</strong>
+                                <ul style="padding-left: 20px; margin-top: 5px;">
+                                    <li>区分“真实滚动限流周期”与“展示用日切统计周期”。</li>
+                                    <li>支持软删除，被删除凭证的历史用量将被归档统计，可在UI中查看。</li>
+                                </ul>
+                            </p>
                         </div>
                         <div>
-                            <p><strong>🛡️ 安全可靠：</strong> OAuth2认证、自动封禁异常账户</p>
-                            <p><strong>🎛️ 配置灵活：</strong> 支持热更新配置、代理设置</p>
-                            <p><strong>📱 界面友好：</strong> 响应式设计、移动端适配</p>
+                            <p><strong>🛡️ 健壮性与可靠性:</strong>
+                                <ul style="padding-left: 20px; margin-top: 5px;">
+                                    <li>统一的存储适配层，兼容文件和Redis后端。</li>
+                                    <li>修复了多实例下删除操作的竞争条件问题。</li>
+                                    <li>增强了对“僵尸”或不完整凭证记录的清理能力。</li>
+                                </ul>
+                            </p>
+                            <p><strong>🎛️ 深度定制与配置:</strong>
+                                <ul style="padding-left: 20px; margin-top: 5px;">
+                                    <li>移除了原作者的推广内容，并替换为定制链接。</li>
+                                    <li>将 Gemini Pro 的默认调用限制调整为 150 次。</li>
+                                </ul>
+                            </p>
                         </div>
                     </div>
                 </div>
