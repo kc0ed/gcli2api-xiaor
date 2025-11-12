@@ -427,6 +427,29 @@ async def get_service_usage_api_url() -> str:
     return str(await get_config_value("service_usage_api_url", "https://serviceusage.googleapis.com", "SERVICE_USAGE_API_URL"))
 
 
+async def get_daily_reset_hour() -> int:
+    """
+    获取每日统计重置小时（展示用，不影响 per-key 24h 滚动限流）
+    
+    范围：0–23，默认 6（早上 6 点）
+    修改后次日生效（无需重启服务器，仅影响展示与手动重置逻辑）
+    
+    Environment variable: DAILY_RESET_HOUR
+    TOML config key: daily_reset_hour
+    Default: 6
+    """
+    raw = await get_config_value("daily_reset_hour", 6, "DAILY_RESET_HOUR")
+    try:
+        hour = int(raw)
+        if 0 <= hour <= 23:
+            return hour
+        log.warning(f"DAILY_RESET_HOUR={hour} 超出 0-23，使用默认值 6")
+        return 6
+    except (ValueError, TypeError):
+        log.warning(f"DAILY_RESET_HOUR 格式无效（{raw}），使用默认值 6")
+        return 6
+
+
 # MongoDB Configuration
 async def get_mongodb_uri() -> str:
     """

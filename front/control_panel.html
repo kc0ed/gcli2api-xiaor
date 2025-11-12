@@ -1301,7 +1301,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                             <li><strong>Gemini 2.5 Pro 调用次数：</strong>仅统计 gemini-2.5-pro 及其变体模型的成功调用</li>
                             <li><strong>所有模型调用次数：</strong>统计所有模型的成功调用总数</li>
                             <li><strong>每日配额：</strong>默认每日配额 Gemini 2.5 Pro: 100次，所有模型: 1000次</li>
-                            <li><strong>配额重置：</strong>每天 UTC 07:00 自动重置调用计数</li>
+                            <li><strong>配额重置：</strong>按每个凭证首次调用时间 24h 滚动重置</li>
+                            <li><strong>日切时间：</strong>每日 06:00（UTC）起算新的展示周期；如需修改，请在环境变量设置 <code>DAILY_RESET_HOUR</code>，次日生效</li>
                         </ul>
 
                         <strong>注意：</strong>
@@ -1786,7 +1787,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         </div>
                     `;
                 }
-            } else if (status.next_reset_time) { // Fallback for old logic
+            } else if (status.next_reset_time) { // 仅当 state 无时间且 stats 有旧字段时回退
                 if (type === 'usage') {
                     return `
                         <div class="usage-info-item" style="grid-column: 1 / -1;">

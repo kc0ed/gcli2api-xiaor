@@ -8,23 +8,20 @@ from datetime import datetime, timezone, timedelta
 from threading import Lock
 from typing import Dict, Any, Optional
 
-from config import get_credentials_dir, is_mongodb_mode
+from config import get_credentials_dir, is_mongodb_mode, get_daily_reset_hour
 from log import log
 from .state_manager import get_state_manager
 from .storage_adapter import get_storage_adapter
 
 
-def _get_next_utc_7am() -> datetime:
+def _get_next_reset_from_state(state: Dict[str, Any]) -> Optional[datetime]:
     """
-    Calculate the next UTC 07:00 time for quota reset.
+    从扁平化 state 读取 next_reset_timestamp，若无则返回 None
     """
-    now = datetime.now(timezone.utc)
-    today_7am = now.replace(hour=7, minute=0, second=0, microsecond=0)
-    
-    if now < today_7am:
-        return today_7am
-    else:
-        return today_7am + timedelta(days=1)
+    ts = state.get("next_reset_timestamp")
+    if ts:
+        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
+    return None
 
 
 class UsageStats:
@@ -211,14 +208,15 @@ class UsageStats:
                 self._cache_dirty = True
                 log.debug(f"Removed oldest usage stats cache entry: {oldest_key}")
             
-            next_reset = _get_next_utc_7am()
+            # **不再**写死 07:00，也不在这里读 state（调用处已读）
             self._stats_cache[normalized_filename] = {
                 "gemini_2_5_pro_calls": 0,
                 "total_calls": 0,
-                "next_reset_time": next_reset.isoformat(),
+                # 不再写入 next_reset_time
                 "daily_limit_gemini_2_5_pro": 100,
                 "daily_limit_total": 1000
             }
+            # 若调用处已把 next_reset_time 放进 stats，则保留；否则留空
             self._cache_dirty = True  # 标记缓存已修改
         
         return self._stats_cache[normalized_filename]
@@ -231,25 +229,24 @@ class UsageStats:
             next_reset_str = stats.get("next_reset_time")
             if not next_reset_str:
                 # No next reset time recorded, set it up
-                next_reset = _get_next_utc_7am()
+                next_reset = _get_next_daily_anchor()
                 stats["next_reset_time"] = next_reset.isoformat()
                 return False
             
             next_reset = datetime.fromisoformat(next_reset_str)
             now = datetime.now(timezone.utc)
             
-            # Simple comparison: if current time >= next reset time, then reset
+            # 仍用 stats 里的时间做比较，但**不再写回**新的 07:00
             if now >= next_reset:
                 old_gemini_calls = stats.get("gemini_2_5_pro_calls", 0)
                 old_total_calls = stats.get("total_calls", 0)
                 
-                # Reset counters and set new next reset time
-                new_next_reset = _get_next_utc_7am()
+                # 只清零计数，不再写 next_reset_time
                 stats.update({
                     "gemini_2_5_pro_calls": 0,
-                    "total_calls": 0,
-                    "next_reset_time": new_next_reset.isoformat()
+                    "total_calls": 0
                 })
+                # 由 CredentialManager 的 24h 滚动逻辑去更新 state.next_reset_timestamp
                 
                 self._cache_dirty = True  # 标记缓存已修改
                 log.info(f"Daily quota reset performed. Previous stats - Gemini 2.5 Pro: {old_gemini_calls}, Total: {old_total_calls}")
@@ -268,6 +265,15 @@ class UsageStats:
         with self._lock:
             try:
                 normalized_filename = self._normalize_filename(filename)
+                # 先读 state，把 next_reset_time 放进缓存（若存在）
+                state = await self._storage_adapter.get_credential_state(normalized_filename)
+                next_reset = _get_next_reset_from_state(state)
+                if next_reset:
+                    # 确保缓存里有一份重置时间，供 _check_and_reset_daily_quota 使用
+                    if normalized_filename not in self._stats_cache:
+                        self._stats_cache[normalized_filename] = {}
+                    self._stats_cache[normalized_filename]["next_reset_time"] = next_reset.isoformat()
+                
                 stats = self._get_or_create_stats(normalized_filename)
                 
                 # Check and perform daily reset if needed
@@ -306,6 +312,14 @@ class UsageStats:
         with self._lock:
             if filename:
                 normalized_filename = self._normalize_filename(filename)
+                # 先读 state 时间
+                state = await self._storage_adapter.get_credential_state(normalized_filename)
+                next_reset = _get_next_reset_from_state(state)
+                if next_reset:
+                    if normalized_filename not in self._stats_cache:
+                        self._stats_cache[normalized_filename] = {}
+                    self._stats_cache[normalized_filename]["next_reset_time"] = next_reset.isoformat()
+                
                 stats = self._get_or_create_stats(normalized_filename)
                 # Check for daily reset before returning stats
                 self._check_and_reset_daily_quota(stats)
@@ -315,12 +329,18 @@ class UsageStats:
                     "total_calls": stats.get("total_calls", 0),
                     "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
                     "daily_limit_total": stats.get("daily_limit_total", 1000),
-                    "next_reset_time": stats.get("next_reset_time")
+                    "next_reset_time": stats.get("next_reset_time")  # 现在来源于 state
                 }
             else:
                 # Return all statistics
                 all_stats = {}
                 for filename, stats in self._stats_cache.items():
+                    # 先补时间（若缓存里无）
+                    if "next_reset_time" not in stats:
+                        state = await self._storage_adapter.get_credential_state(filename)
+                        next_reset = _get_next_reset_from_state(state)
+                        if next_reset:
+                            stats["next_reset_time"] = next_reset.isoformat()
                     # Check for daily reset for each file
                     self._check_and_reset_daily_quota(stats)
                     all_stats[filename] = {
@@ -328,7 +348,7 @@ class UsageStats:
                         "total_calls": stats.get("total_calls", 0),
                         "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
                         "daily_limit_total": stats.get("daily_limit_total", 1000),
-                        "next_reset_time": stats.get("next_reset_time")
+                        "next_reset_time": stats.get("next_reset_time")  # 来源于 state
                     }
                 
                 return all_stats
@@ -354,7 +374,7 @@ class UsageStats:
             "total_all_model_calls": total_all_models,
             "avg_gemini_2_5_pro_per_file": total_gemini_2_5_pro / max(total_files, 1),
             "avg_total_per_file": total_all_models / max(total_files, 1),
-            "next_reset_time": _get_next_utc_7am().isoformat()
+            "next_reset_time": _get_next_reset_from_state(await self._storage_adapter.get_credential_state(filename)) or _get_next_utc_7am().isoformat()
         }
     
     async def update_daily_limits(self, filename: str, gemini_2_5_pro_limit: int = None, 
@@ -393,23 +413,21 @@ class UsageStats:
             if filename:
                 normalized_filename = self._normalize_filename(filename)
                 if normalized_filename in self._stats_cache:
-                    # Manual reset: reset counters and set new next reset time
-                    next_reset = _get_next_utc_7am()
+                    # Manual reset: 只清零，不再写死时间
                     self._stats_cache[normalized_filename].update({
                         "gemini_2_5_pro_calls": 0,
-                        "total_calls": 0,
-                        "next_reset_time": next_reset.isoformat()
+                        "total_calls": 0
                     })
+                    # 时间字段由外部 state 决定
                     log.info(f"Reset usage statistics for {normalized_filename}")
             else:
-                # Reset all statistics
-                next_reset = _get_next_utc_7am()
+                # Reset all statistics - 不再写死 07:00
                 for filename, stats in self._stats_cache.items():
                     stats.update({
                         "gemini_2_5_pro_calls": 0,
-                        "total_calls": 0,
-                        "next_reset_time": next_reset.isoformat()
+                        "total_calls": 0
                     })
+                    # 时间由 state 统一管理
                 log.info("Reset usage statistics for all credential files")
         
         await self._save_stats()
