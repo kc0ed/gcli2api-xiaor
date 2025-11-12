@@ -1285,6 +1285,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     <button class="btn" style="background-color: #dc3545;"
                         onclick="resetAllUsageStats()">重置所有统计</button>
                 </div>
+                <div id="usagePeriod" class="status info" style="text-align: center; margin-top: 15px; display: none;"></div>
 
                 <!-- 文件使用统计列表 -->
                 <div id="usageListSection">
@@ -1458,6 +1459,19 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                                 <small class="config-note">每个凭证使用多少次后轮换到下一个</small>
                             </div>
 
+                        </div>
+
+                        <div class="config-group">
+                            <h4>统计配置</h4>
+                            <div class="form-group">
+                                <label for="dailyResetHour">每日统计重置时间 (UTC):</label>
+                                <input type="number" id="dailyResetHour" class="config-input" min="0" max="23" />
+                                <small class="config-note">
+                                    设置展示用统计的每日重置时间（0-23点）。
+                                    <br><strong>注意:</strong> 此设置仅影响“使用统计”页面的展示，不影响每个凭证的24小时滚动限流。
+                                    <br><strong style="color: #dc3545;">修改后，新的统计周期将在下一个重置点生效。</strong>
+                                </small>
+                            </div>
                         </div>
 
                         <div class="config-group">
@@ -2968,6 +2982,9 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             // 性能配置
             setConfigField('callsPerRotation', currentConfig.calls_per_rotation || 10);
 
+            // 统计配置
+            setConfigField('dailyResetHour', currentConfig.daily_reset_hour || 6);
+
             // 429重试配置
             document.getElementById('retry429Enabled').checked = Boolean(currentConfig.retry_429_enabled);
             setConfigField('retry429MaxRetries', currentConfig.retry_429_max_retries || 20);
@@ -3024,6 +3041,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                         .map(code => parseInt(code.trim()))
                         .filter(code => !isNaN(code)),
                     calls_per_rotation: parseInt(document.getElementById('callsPerRotation').value) || 10,
+                    daily_reset_hour: parseInt(document.getElementById('dailyResetHour').value) || 6,
                     retry_429_enabled: document.getElementById('retry429Enabled').checked,
                     retry_429_max_retries: parseInt(document.getElementById('retry429MaxRetries').value) || 20,
                     retry_429_interval: parseFloat(document.getElementById('retry429Interval').value) || 0.1,
@@ -3587,6 +3605,17 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     document.getElementById('totalApiCalls').textContent = aggregatedData.data.total_all_model_calls || 0;
                     document.getElementById('geminiProCalls').textContent = aggregatedData.data.total_gemini_2_5_pro_calls || 0;
                     document.getElementById('totalFiles').textContent = aggregatedData.data.total_files || 0;
+
+                    // 更新并显示统计周期
+                    const usagePeriodEl = document.getElementById('usagePeriod');
+                    if (aggregatedData.data.display_period_start && aggregatedData.data.display_period_end) {
+                        const start = new Date(aggregatedData.data.display_period_start).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                        const end = new Date(aggregatedData.data.display_period_end).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+                        usagePeriodEl.innerHTML = `<strong>当前统计周期:</strong> ${start} &mdash; ${end} (UTC+8)`;
+                        usagePeriodEl.style.display = 'block';
+                    } else {
+                        usagePeriodEl.style.display = 'none';
+                    }
 
                     // 渲染使用统计列表
                     renderUsageList();
