@@ -601,6 +601,14 @@ async def upload_credentials(files: List[UploadFile] = File(...), token: str = D
             log.info(f"批次 {batch_num}/{total_batches} 完成: 成功 {batch_uploaded_count}/{len(batch_files)} 个文件")
         
         if total_success > 0:
+            # 上传成功后，立即通知 CredentialManager 刷新缓存
+            try:
+                credential_manager = await get_credential_manager_instance()
+                await credential_manager._discover_credentials()
+                log.info("上传成功，已触发凭证管理器缓存刷新。")
+            except Exception as e:
+                log.warning(f"触发凭证管理器缓存刷新失败: {e}")
+
             return JSONResponse(content={
                 "uploaded_count": total_success,
                 "total_count": len(files_data),
