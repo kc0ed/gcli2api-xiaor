@@ -2819,15 +2819,31 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             }
 
             // 格式化时间
-            function formatTime(isoString) {
-                if (!isoString) return '未知';
+            function formatTime(timestamp) {
+                if (!timestamp) return '未知';
                 try {
-                    const date = new Date(isoString);
-                    return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+                    const date = new Date(timestamp * 1000);
+                    return date.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }).replace(/\//g, '-');
                 } catch (e) {
                     return '格式错误';
                 }
             }
+
+            const resetTimestamp = stats.enforcement_next_reset || stats.next_reset_timestamp;
+            const startTimestamp = stats.first_use_timestamp;
+            let timeRemainingStr = '';
+            if (resetTimestamp) {
+                const resetDate = new Date(resetTimestamp * 1000);
+                const timeRemaining = resetDate - new Date();
+                if (timeRemaining > 0) {
+                    const hours = Math.floor(timeRemaining / (3600 * 1000));
+                    const minutes = Math.floor((timeRemaining % (3600 * 1000)) / (60 * 1000));
+                    timeRemainingStr = ` (剩 ${hours}h ${minutes}m)`;
+                }
+            }
+
+            const startHtml = startTimestamp ? `<div style="color: #333;">${formatTime(startTimestamp)}</div>` : `<div style="color: #999;">N/A</div>`;
+            const resetHtml = resetTimestamp ? `<div style="color: #333;">${formatTime(resetTimestamp)}<span style="color: #007bff; font-weight: bold;">${timeRemainingStr}</span></div>` : `<div style="color: #999;">N/A</div>`;
 
             div.innerHTML = `
                 <div class="card-header">
@@ -2856,8 +2872,12 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                 
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; font-size: 11px;">
                     <div style="background-color: #f8f9fa; padding: 6px; border-radius: 4px; border: 1px solid #dee2e6;">
-                        <div style="font-weight: bold; color: #666; margin-bottom: 2px;">下次重置时间</div>
-                        <div style="color: #333;">${formatTime(stats.next_reset_time)}</div>
+                        <div style="font-weight: bold; color: #007bff; margin-bottom: 2px;">周期开始</div>
+                        ${startHtml}
+                    </div>
+                    <div style="background-color: #f8f9fa; padding: 6px; border-radius: 4px; border: 1px solid #dee2e6;">
+                        <div style="font-weight: bold; color: #007bff; margin-bottom: 2px;">周期重置</div>
+                        ${resetHtml}
                     </div>
                 </div>
                 

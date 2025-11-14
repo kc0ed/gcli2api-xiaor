@@ -141,15 +141,15 @@ class UsageStats:
                         usage_data = {
                             "gemini_2_5_pro_calls": stats_data.get("gemini_2_5_pro_calls", 0),
                             "total_calls": stats_data.get("total_calls", 0),
-                            "next_reset_time": stats_data.get("next_reset_time"),
-                            "daily_limit_gemini_2_5_pro": stats_data.get("daily_limit_gemini_2_5_pro", 100),
+                            "display_next_reset": stats_data.get("display_next_reset", stats_data.get("next_reset_time")), # 兼容旧数据
+                            "daily_limit_gemini_2_5_pro": stats_data.get("daily_limit_gemini_2_5_pro", 150),
                             "daily_limit_total": stats_data.get("daily_limit_total", 1000)
                         }
                         
-                        # 只加载有实际使用数据的统计，或者有reset时间的
-                        if (usage_data.get("gemini_2_5_pro_calls", 0) > 0 or 
-                            usage_data.get("total_calls", 0) > 0 or 
-                            usage_data.get("next_reset_time")):
+                        # 只加载有实际使用数据的统计，或者有展示用reset时间的
+                        if (usage_data.get("gemini_2_5_pro_calls", 0) > 0 or
+                            usage_data.get("total_calls", 0) > 0 or
+                            usage_data.get("display_next_reset")):
                             stats_cache[normalized_filename] = usage_data
                             processed_count += 1
                 
@@ -188,8 +188,8 @@ class UsageStats:
                     stats_data = {
                         "gemini_2_5_pro_calls": stats.get("gemini_2_5_pro_calls", 0),
                         "total_calls": stats.get("total_calls", 0),
-                        "next_reset_time": stats.get("next_reset_time"),
-                        "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 100),
+                        "display_next_reset": stats.get("display_next_reset"),
+                        "daily_limit_gemini_2_5_pro": stats.get("daily_limit_gemini_2_5_pro", 150),
                         "daily_limit_total": stats.get("daily_limit_total", 1000)
                     }
                     
@@ -224,7 +224,6 @@ class UsageStats:
             self._stats_cache[normalized_filename] = {
                 "gemini_2_5_pro_calls": 0,
                 "total_calls": 0,
-                # 不再写入 next_reset_time
                 "daily_limit_gemini_2_5_pro": 150,
                 "daily_limit_total": 1000
             }
@@ -238,12 +237,12 @@ class UsageStats:
         Simple reset logic for display purposes: if current time >= next_reset_time, then reset.
         """
         try:
-            next_reset_str = stats.get("next_reset_time")
+            next_reset_str = stats.get("display_next_reset")
             
             # If there's no display reset time, set it for the first time.
             if not next_reset_str:
                 next_reset = await self._get_next_daily_anchor()
-                stats["next_reset_time"] = next_reset.isoformat()
+                stats["display_next_reset"] = next_reset.isoformat()
                 self._cache_dirty = True
                 return False
 
@@ -260,7 +259,7 @@ class UsageStats:
                 stats.update({
                     "gemini_2_5_pro_calls": 0,
                     "total_calls": 0,
-                    "next_reset_time": new_next_reset.isoformat()
+                    "display_next_reset": new_next_reset.isoformat()
                 })
                 
                 self._cache_dirty = True
@@ -283,11 +282,6 @@ class UsageStats:
                 stats = self._get_or_create_stats(normalized_filename)
                 
                 # First, try to get the 24h rolling window time from the full state
-                state = await self._storage_adapter.get_credential_state(normalized_filename)
-                real_reset_ts = state.get("next_reset_timestamp")
-                if real_reset_ts:
-                    stats["next_reset_timestamp"] = real_reset_ts # Pass it to the stats object
-                
                 # Check and perform daily display reset if needed
                 reset_performed = await self._check_and_reset_daily_quota(stats)
                 
@@ -299,7 +293,7 @@ class UsageStats:
                 self._cache_dirty = True
                 
                 log.debug(f"Usage recorded - File: {normalized_filename}, Model: {model_name}, "
-                         f"Gemini 2.5 Pro: {stats['gemini_2_5_pro_calls']}/{stats.get('daily_limit_gemini_2_5_pro', 100)}, "
+                         f"Gemini 2.5 Pro: {stats['gemini_2_5_pro_calls']}/{stats.get('daily_limit_gemini_2_5_pro', 150)}, "
                          f"Total: {stats['total_calls']}/{stats.get('daily_limit_total', 1000)}")
                 
                 if reset_performed:
@@ -324,9 +318,12 @@ class UsageStats:
                 normalized_filename = self._normalize_filename(filename)
                 stats = self._get_or_create_stats(normalized_filename)
                 
-                # Ensure the latest state is reflected before returning
+                # 安全地合并来自持久层的实时状态，避免覆盖展示逻辑
                 state = await self._storage_adapter.get_credential_state(normalized_filename)
-                stats.update(state) # Merge full state into stats object
+                stats['is_rate_limited'] = state.get('is_rate_limited', False)
+                stats['disabled'] = state.get('disabled', False)
+                stats['enforcement_next_reset'] = state.get('next_reset_timestamp')
+                stats['user_email'] = state.get('user_email')
                 
                 await self._check_and_reset_daily_quota(stats)
                 return stats
@@ -339,7 +336,13 @@ class UsageStats:
                 for fname in all_filenames:
                     stats = self._get_or_create_stats(fname)
                     state = await self._storage_adapter.get_credential_state(fname)
-                    stats.update(state)
+                    
+                    # 安全地合并实时状态
+                    stats['is_rate_limited'] = state.get('is_rate_limited', False)
+                    stats['disabled'] = state.get('disabled', False)
+                    stats['enforcement_next_reset'] = state.get('next_reset_timestamp')
+                    stats['user_email'] = state.get('user_email')
+                    
                     await self._check_and_reset_daily_quota(stats)
                     all_stats[fname] = stats
                 
@@ -392,7 +395,7 @@ class UsageStats:
                 
                 self._cache_dirty = True
                 log.info(f"Updated daily limits for {normalized_filename}: "
-                        f"Gemini 2.5 Pro = {stats.get('daily_limit_gemini_2_5_pro', 100)}, "
+                        f"Gemini 2.5 Pro = {stats.get('daily_limit_gemini_2_5_pro', 150)}, "
                         f"Total = {stats.get('daily_limit_total', 1000)}")
                 
             except Exception as e:

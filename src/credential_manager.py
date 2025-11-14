@@ -26,19 +26,22 @@ class CredentialManager:
         self._storage_adapter = None
         
         # 凭证轮换相关
-        self._credential_files: List[str] = []  # 存储凭证文件名列表
-        self._current_credential_index = 0
         self._call_count = 0
         self._last_scan_time = 0
         
-        # 当前使用的凭证信息
+        # 凭证轮换与缓存
+        self._current_credential_index = 0
+        self._available_creds: List[str] = []  # 可用凭证的有序列表，用于轮换
+        self._ratelimited_creds: Dict[str, float] = {}  # 限流凭证: { name: next_reset_timestamp }
+        
+        # 当前使用的凭证信息 (由 get_valid_credential 临时填充)
         self._current_credential_file: Optional[str] = None
         self._current_credential_data: Optional[Dict[str, Any]] = None
-        self._current_credential_state: Dict[str, Any] = {}
         
         # 并发控制
-        self._state_lock = asyncio.Lock()
-        self._operation_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()  # 用于初始化和关闭
+        self._operation_lock = asyncio.Lock() # 保证 get_valid_credential 的调用原子性
+        self._cache_lock = asyncio.Lock()  # 用于所有内存缓存的读写操作
         
         # 工作线程控制
         self._shutdown_event = asyncio.Event()
@@ -142,101 +145,87 @@ class CredentialManager:
             self._write_worker_running = False
     
     async def _discover_credentials(self):
-        """发现和加载所有可用凭证"""
+        """
+        从持久化存储中发现所有凭证，并更新内存缓存。
+        这是连接持久层和内存缓存的桥梁。
+        """
         try:
-            # 从存储适配器获取所有凭证
-            all_credentials = await self._storage_adapter.list_credentials()
-            
-            # 过滤出可用的凭证（排除被禁用的）- 批量读取状态以提升性能
-            available_credentials = []
-            
-            # 批量获取所有凭证状态，避免多次读取状态文件
-            if all_credentials:
-                try:
-                    all_states = await self._storage_adapter.get_all_credential_states()
-                    
-                    for credential_name in all_credentials:
-                        normalized_name = credential_name
-                        # 标准化文件名以匹配状态数据中的键
-                        if hasattr(self._storage_adapter._backend, '_normalize_filename'):
-                            normalized_name = self._storage_adapter._backend._normalize_filename(credential_name)
-                        
-                        state = all_states.get(normalized_name, {})
-                        if not state.get("disabled", False) and not state.get("is_rate_limited", False):
-                            available_credentials.append(credential_name)
-                except Exception as e:
-                    log.warning(f"Failed to batch load credential states, falling back to individual checks: {e}")
-                    # 如果批量读取失败，回退到逐个检查
-                    for credential_name in all_credentials:
-                        try:
-                            state = await self._storage_adapter.get_credential_state(credential_name)
-                            if not state.get("disabled", False) and not state.get("is_rate_limited", False):
-                                available_credentials.append(credential_name)
-                        except Exception as e2:
-                            log.warning(f"Failed to check state for credential {credential_name}: {e2}")
-            
-            # 更新凭证列表
-            old_credentials = set(self._credential_files)
-            new_credentials = set(available_credentials)
-            
-            if old_credentials != new_credentials:
-                # 记录变化（只在非初始状态时记录）
-                is_initial_load = len(old_credentials) == 0
-                added = new_credentials - old_credentials
-                removed = old_credentials - new_credentials
-                
-                self._credential_files = available_credentials
-                
-                # 初始加载时只记录调试信息，运行时变化才记录INFO
-                if not is_initial_load:
-                    log.info(f"凭证列表发生变化。新增: {list(added) if added else '无'}, 移除: {list(removed) if removed else '无'}")
-                    log.info(f"当前可用凭证列表: {self._credential_files}")
-                    # 强制重置状态，确保从新的列表中选择
-                    self._current_credential_index = 0
-                    self._current_credential_file = None
-                    self._current_credential_data = None
-                    self._call_count = 0
-                    log.info("CredentialManager 状态已重置，将从新的凭证列表开始选择。")
-                else:
-                    # 初始加载时只记录调试信息
-                    if available_credentials:
-                        log.debug(f"初始加载发现 {len(available_credentials)} 个可用凭证: {available_credentials}")
+            all_credential_names = await self._storage_adapter.list_credentials()
+            if not all_credential_names:
+                log.warning("No credential files found in storage.")
+                async with self._cache_lock:
+                    self._available_creds.clear()
+                    self._ratelimited_creds.clear()
+                return
 
-                # 重置当前索引如果需要 (双重保险)
-                if self._current_credential_index >= len(self._credential_files):
-                    self._current_credential_index = 0
+            all_states = await self._storage_adapter.get_all_credential_states()
             
-            if not self._credential_files:
-                log.warning("No available credential files found")
-            else:
-                log.debug(f"Available credentials: {len(self._credential_files)} files")
+            new_available = []
+            new_ratelimited = {}
+            
+            for name in all_credential_names:
+                # 标准化文件名以匹配状态键
+                state_key = name
+                if hasattr(self._storage_adapter._backend, '_normalize_filename'):
+                    state_key = self._storage_adapter._backend._normalize_filename(name)
                 
-        except Exception as e:
-            log.error(f"Failed to discover credentials: {e}")
-    
-    async def _load_current_credential(self) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """加载当前选中的凭证数据，包含token过期检测和自动刷新"""
-        if not self._credential_files:
-            return None
-        
-        try:
-            current_file = self._credential_files[self._current_credential_index]
+                state = all_states.get(state_key, {})
+
+                if state.get("disabled", False):
+                    continue  # 跳过禁用的
+
+                if state.get("is_rate_limited", False):
+                    # 如果被限流，但有重置时间，则加入限流列表等待恢复
+                    reset_ts = state.get("next_reset_timestamp")
+                    if reset_ts:
+                        new_ratelimited[name] = float(reset_ts)
+                else:
+                    # 否则加入可用列表
+                    new_available.append(name)
+
+            # 原子化更新内存缓存
+            async with self._cache_lock:
+                # 对比变化，打印日志
+                old_available_set = set(self._available_creds)
+                new_available_set = set(new_available)
+                
+                if old_available_set != new_available_set:
+                    added = new_available_set - old_available_set
+                    removed = old_available_set - new_available_set
+                    log.info(f"可用凭证缓存更新。新增: {list(added) if added else '无'}, 移除: {list(removed) if removed else '无'}")
+                    
+                    self._available_creds = new_available
+                    # 如果列表变化，重置索引
+                    if self._current_credential_index >= len(self._available_creds):
+                        self._current_credential_index = 0
+                        self._call_count = 0
+                        log.info("凭证索引已重置。")
+                
+                self._ratelimited_creds = new_ratelimited
             
+            log.debug(f"凭证缓存刷新完成。可用: {len(self._available_creds)}, 限流: {len(self._ratelimited_creds)}")
+
+        except Exception as e:
+            log.error(f"Failed to discover credentials and update cache: {e}")
+    
+    async def _load_credential_data(self, credential_name: str) -> Optional[Dict[str, Any]]:
+        """为指定的凭证名称加载其完整数据，包含token过期检测和自动刷新"""
+        try:
             # 从存储适配器加载凭证数据
-            credential_data = await self._storage_adapter.get_credential(current_file)
+            credential_data = await self._storage_adapter.get_credential(credential_name)
             if not credential_data:
-                log.error(f"Failed to load credential data for: {current_file}")
+                log.error(f"Failed to load credential data for: {credential_name}")
                 return None
             
             # 检查refresh_token
             if "refresh_token" not in credential_data or not credential_data["refresh_token"]:
-                log.warning(f"No refresh token in {current_file}")
+                log.warning(f"No refresh token in {credential_name}")
                 return None
                 
             # Auto-add 'type' field if missing but has required OAuth fields
             if 'type' not in credential_data and all(key in credential_data for key in ['client_id', 'refresh_token']):
                 credential_data['type'] = 'authorized_user'
-                log.debug(f"Auto-added 'type' field to credential from file {current_file}")
+                log.debug(f"Auto-added 'type' field to credential from file {credential_name}")
             
             # 兼容不同的token字段格式
             if "access_token" in credential_data and "token" not in credential_data:
@@ -248,110 +237,94 @@ class CredentialManager:
             should_refresh = await self._should_refresh_token(credential_data)
             
             if should_refresh:
-                log.debug(f"Token需要刷新 - 文件: {current_file}")
-                refreshed_data = await self._refresh_token(credential_data, current_file)
+                log.debug(f"Token需要刷新 - 文件: {credential_name}")
+                refreshed_data = await self._refresh_token(credential_data, credential_name)
                 if refreshed_data:
                     credential_data = refreshed_data
-                    log.debug(f"Token刷新成功: {current_file}")
+                    log.debug(f"Token刷新成功: {credential_name}")
                 else:
-                    log.error(f"Token刷新失败: {current_file}")
+                    log.error(f"Token刷新失败: {credential_name}")
                     return None
             
-            # 加载状态信息
-            state_data = await self._storage_adapter.get_credential_state(current_file)
-            
-            # 缓存当前凭证信息
-            self._current_credential_file = current_file
-            self._current_credential_data = credential_data
-            self._current_credential_state = state_data
-            
-            return current_file, credential_data
+            return credential_data
             
         except Exception as e:
-            log.error(f"Error loading current credential: {e}")
+            log.error(f"Error loading credential data for {credential_name}: {e}")
             return None
     
     async def get_valid_credential(self) -> Optional[Tuple[str, Dict[str, Any]]]:
-        """获取有效的凭证，自动处理轮换和失效凭证切换"""
+        """
+        【高性能】获取一个有效的凭证。
+        此方法经过优化，优先使用内存缓存进行选择，仅在最后加载数据时执行I/O。
+        """
         async with self._operation_lock:
-            log.info(f"API 调用，准备获取凭证。当前索引: {self._current_credential_index}, 当前缓存文件: {self._current_credential_file}")
-            if not self._credential_files:
-                await self._discover_credentials()
-                if not self._credential_files:
-                    return None
+            # 1. 从内存缓存中快速选择一个凭证名称
+            async with self._cache_lock:
+                if not self._available_creds:
+                    # 缓存为空，尝试从持久层同步一次
+                    log.info("可用凭证缓存为空，尝试从持久层同步...")
+                    await self._discover_credentials()
+                    if not self._available_creds:
+                        log.error("没有可用的凭证。")
+                        return None
+
+                # 检查是否需要轮换 (纯内存操作)
+                if await self._should_rotate():
+                    await self._rotate_credential()
+                
+                # 选择当前凭证名称 (纯内存操作)
+                selected_name = self._available_creds[self._current_credential_index]
             
-            # 检查是否需要轮换
-            if await self._should_rotate():
-                await self._rotate_credential()
+            log.info(f"API 调用，准备获取凭证。缓存选择: {selected_name} (索引: {self._current_credential_index})")
+
+            # 2. 加载选中凭证的数据 (执行I/O)
+            credential_data = await self._load_credential_data(selected_name)
             
-            # 尝试获取有效凭证，如果失败则自动切换
-            max_attempts = len(self._credential_files)  # 最多尝试所有凭证
+            # 3. 处理加载结果
+            if not credential_data:
+                log.warning(f"凭证 {selected_name} 加载失败，可能已失效。将其禁用并等待后台任务清理。")
+                # 快速失败：禁用凭证，本次请求失败，下一个请求将自动使用新的凭证列表。
+                await self.set_cred_disabled(selected_name, True)
+                return None
+
+            # 4. 检查并更新24小时使用周期 (可能执行I/O)
+            # 注意：状态信息需要单独获取
+            credential_state = await self._storage_adapter.get_credential_state(selected_name)
+            await self._check_and_update_usage_cycle(selected_name, credential_state)
+
+            # 填充当前凭证信息，用于日志记录或兼容旧代码
+            self._current_credential_file = selected_name
+            self._current_credential_data = credential_data
             
-            for attempt in range(max_attempts):
-                try:
-                    # 加载当前凭证
-                    result = await self._load_current_credential()
-                    if result:
-                        # 检查并更新24小时使用周期
-                        await self._check_and_update_usage_cycle(self._current_credential_file, self._current_credential_state)
-                        return result
-                    
-                    # 当前凭证加载失败，标记为失效并切换到下一个
-                    current_file = self._credential_files[self._current_credential_index] if self._credential_files else None
-                    if current_file:
-                        log.warning(f"凭证失效，自动禁用并切换: {current_file}")
-                        await self.set_cred_disabled(current_file, True)
-                        
-                        # 重新发现可用凭证（排除刚禁用的）
-                        await self._discover_credentials()
-                        if not self._credential_files:
-                            log.error("没有可用的凭证")
-                            return None
-                        
-                        # 重置索引到第一个可用凭证
-                        self._current_credential_index = 0
-                        log.info(f"切换到下一个可用凭证 (索引: {self._current_credential_index})")
-                    else:
-                        log.error("无法获取当前凭证文件名")
-                        break
-                        
-                except Exception as e:
-                    log.error(f"获取凭证时发生异常 (尝试 {attempt + 1}/{max_attempts}): {e}")
-                    if attempt < max_attempts - 1:
-                        # 切换到下一个凭证继续尝试
-                        await self._rotate_credential()
-                    continue
-            
-            log.error(f"所有 {max_attempts} 个凭证都尝试失败")
-            return None
+            return selected_name, credential_data
     
     async def _should_rotate(self) -> bool:
         """检查是否需要轮换凭证"""
-        if not self._credential_files or len(self._credential_files) <= 1:
+        if not self._available_creds or len(self._available_creds) <= 1:
             return False
         
         current_calls_per_rotation = await get_calls_per_rotation()
         return self._call_count >= current_calls_per_rotation
     
     async def _rotate_credential(self):
-        """轮换到下一个凭证"""
-        if len(self._credential_files) <= 1:
+        """轮换到下一个凭证 (纯内存操作)"""
+        if len(self._available_creds) <= 1:
             return
         
-        self._current_credential_index = (self._current_credential_index + 1) % len(self._credential_files)
+        self._current_credential_index = (self._current_credential_index + 1) % len(self._available_creds)
         self._call_count = 0
         
-        log.info(f"Rotated to credential index {self._current_credential_index}")
+        log.info(f"凭证缓存轮换到索引: {self._current_credential_index}")
     
     async def force_rotate_credential(self):
         """强制轮换到下一个凭证（用于429错误处理）"""
-        async with self._operation_lock:
-            if len(self._credential_files) <= 1:
-                log.warning("Only one credential available, cannot rotate")
+        async with self._cache_lock:
+            if len(self._available_creds) <= 1:
+                log.warning("只有一个可用凭证，无法轮换。")
                 return
             
             await self._rotate_credential()
-            log.info("Forced credential rotation due to rate limit")
+            log.info("因速率限制强制轮换凭证。")
     
     def increment_call_count(self):
         """增加调用计数"""
@@ -364,9 +337,6 @@ class CredentialManager:
             success = await self._storage_adapter.update_credential_state(credential_name, state_updates)
             
             # 如果是当前使用的凭证，更新缓存
-            if credential_name == self._current_credential_file:
-                self._current_credential_state.update(state_updates)
-            
             if success:
                 log.debug(f"Updated credential state: {credential_name}")
             else:
@@ -381,22 +351,34 @@ class CredentialManager:
     async def set_cred_disabled(self, credential_name: str, disabled: bool):
         """设置凭证的启用/禁用状态"""
         try:
+            # 1. 更新持久化存储
             state_updates = {"disabled": disabled}
             success = await self.update_credential_state(credential_name, state_updates)
-            
-            if success:
-                # 只要凭证的禁用/启用状态发生变化，就立即重新发现可用凭证
-                # 这是为了确保内部的可用列表 (_credential_files) 总是最新的
-                await self._discover_credentials()
+            if not success:
+                return False
+
+            # 2. 更新内存缓存
+            async with self._cache_lock:
+                action = "禁用" if disabled else "启用"
+                log.info(f"正在更新缓存以 {action} 凭证: {credential_name}")
                 
-                # 如果禁用了当前正在使用的凭证，额外执行一次轮换
-                if disabled and credential_name == self._current_credential_file and self._credential_files:
-                    await self._rotate_credential()
+                # 从两个缓存中都尝试移除
+                if credential_name in self._available_creds:
+                    self._available_creds.remove(credential_name)
+                if credential_name in self._ratelimited_creds:
+                    del self._ratelimited_creds[credential_name]
                 
-                action = "disabled" if disabled else "enabled"
-                log.info(f"Credential {action}: {credential_name}")
-            
-            return success
+                # 如果是启用，则加回可用列表
+                if not disabled:
+                    if credential_name not in self._available_creds:
+                        self._available_creds.append(credential_name)
+
+                # 确保索引不会越界
+                if self._current_credential_index >= len(self._available_creds):
+                    self._current_credential_index = 0
+
+            log.info(f"凭证 {credential_name} 已{action}，缓存已同步。")
+            return True
             
         except Exception as e:
             log.error(f"Error setting credential disabled state {credential_name}: {e}")
@@ -439,50 +421,47 @@ class CredentialManager:
 
     async def _recover_rate_limited_credentials(self):
         """
-        自动恢复已达重置时间的限流凭证。
-
-        策略：
-        - 对 is_rate_limited=True 的凭证：
-          - 如果 next_reset_timestamp 存在且当前时间 >= next_reset_timestamp：
-            - 直接解除限流标记，并重置周期起点为当前时间。
-        - 不主动打真实API探测请求，避免额外配额消耗，由后续正常请求自然验证。
+        【基于内存缓存】自动恢复已达重置时间的限流凭证。
         """
         try:
-            if not self._storage_adapter:
+            now = time.time()
+            recovered_creds = []
+
+            # 1. 从内存缓存中识别可恢复的凭证
+            async with self._cache_lock:
+                # 创建副本以安全遍历
+                ratelimited_copy = list(self._ratelimited_creds.items())
+                for name, reset_ts in ratelimited_copy:
+                    if now >= reset_ts:
+                        recovered_creds.append(name)
+                        # 从限流缓存中移除
+                        del self._ratelimited_creds[name]
+            
+            if not recovered_creds:
                 return
 
-            all_states = await self._storage_adapter.get_all_credential_states()
-            now = time.time()
-            updates_batch = {}
+            log.info(f"发现 {len(recovered_creds)} 个可恢复的限流凭证: {recovered_creds}")
 
-            for name, state in all_states.items():
-                if not state.get("is_rate_limited"):
-                    continue
-
-                next_reset_ts = state.get("next_reset_timestamp")
-                # 如果没有next_reset_timestamp，按保守策略：给它补一个24h窗口再等一轮
-                if next_reset_ts is None:
-                    continue
-
-                if now >= float(next_reset_ts):
-                    # 到点自动解封
-                    updates_batch[name] = {
-                        "is_rate_limited": False,
-                        "first_use_timestamp": now,
-                        "next_reset_timestamp": now + 24 * 3600,
-                    }
-
-            # 批量更新
-            for name, updates in updates_batch.items():
+            # 2. 批量更新持久化存储
+            for name in recovered_creds:
+                updates = {
+                    "is_rate_limited": False,
+                    "first_use_timestamp": now,
+                    "next_reset_timestamp": now + 24 * 3600,
+                }
                 await self.update_credential_state(name, updates)
                 log.info(f"自动恢复限流凭证 {name}，启动新的24小时周期。")
 
-            # 若有恢复，重新发现可用凭证
-            if updates_batch:
-                await self._discover_credentials()
+            # 3. 将恢复的凭证移回可用缓存
+            async with self._cache_lock:
+                for name in recovered_creds:
+                    if name not in self._available_creds:
+                        self._available_creds.append(name)
+            
+            log.info("可用凭证缓存已更新。")
 
         except Exception as e:
-            log.error(f"Error while recovering rate-limited credentials: {e}")
+            log.error(f"Error while recovering rate-limited credentials from cache: {e}")
 
     async def mark_rate_limited(self, credential_name: str, is_limited: bool):
         """
@@ -492,37 +471,46 @@ class CredentialManager:
         - is_limited=False: 手动解除限流（通常由自动恢复逻辑或管理员操作触发）。
         """
         try:
+            # 1. 准备状态更新并写入持久存储
             state_updates = {"is_rate_limited": is_limited}
-
-            # 如果是设置为限流且当前没有24h窗口，则从现在起设置一个窗口，方便恢复逻辑判断
+            now = time.time()
+            reset_timestamp = now + 24 * 3600
+            
             if is_limited:
-                now = time.time()
-                if self._current_credential_state.get("next_reset_timestamp") is None or credential_name != self._current_credential_file:
-                    # 谨慎：单独读该凭证的状态，避免引用错误
-                    try:
-                        state = await self._storage_adapter.get_credential_state(credential_name)
-                    except Exception:
-                        state = {}
-                    if state.get("next_reset_timestamp") is None:
-                        state_updates["first_use_timestamp"] = now
-                        state_updates["next_reset_timestamp"] = now + 24 * 3600
+                state_updates["first_use_timestamp"] = now
+                state_updates["next_reset_timestamp"] = reset_timestamp
 
             success = await self.update_credential_state(credential_name, state_updates)
-            
-            if success:
+            if not success:
+                return False
+
+            # 2. 更新内存缓存
+            async with self._cache_lock:
+                # 从可用列表中移除
+                if credential_name in self._available_creds:
+                    self._available_creds.remove(credential_name)
+                
                 if is_limited:
-                    log.warning(f"[429 Rate Limit] 凭证 {credential_name} 已被限流，将自动切换。")
+                    # 加入限流列表
+                    self._ratelimited_creds[credential_name] = reset_timestamp
+                    log.warning(f"[429 Rate Limit] 凭证 {credential_name} 已被限流，缓存已更新。")
                 else:
-                    log.info(f"Credential {credential_name} cleared from rate-limit.")
-                
-                # 立即刷新可用凭证列表
-                await self._discover_credentials()
-                
-                # 如果是当前凭证被限制，立即轮换
-                if is_limited and credential_name == self._current_credential_file:
-                    await self.force_rotate_credential()
+                    # 如果是解除限流，从限流列表移除并加回可用列表
+                    if credential_name in self._ratelimited_creds:
+                        del self._ratelimited_creds[credential_name]
+                    if credential_name not in self._available_creds:
+                        self._available_creds.append(credential_name)
+                    log.info(f"凭证 {credential_name} 已从限流中清除，缓存已更新。")
+
+                # 如果当前索引指向的凭证被移除了，重置索引
+                if self._current_credential_index >= len(self._available_creds):
+                    self._current_credential_index = 0
+
+            # 3. 如果是当前凭证被限制，立即轮换
+            if is_limited:
+                await self.force_rotate_credential()
             
-            return success
+            return True
                 
         except Exception as e:
             log.error(f"Error marking rate limit for {credential_name}: {e}")

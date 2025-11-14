@@ -1109,6 +1109,9 @@ async def get_config(token: str = Depends(verify_token)):
         # 性能配置
         current_config["calls_per_rotation"] = await config.get_calls_per_rotation()
         
+        # 统计配置
+        current_config["daily_reset_hour"] = await config.get_daily_reset_hour()
+        
         # 429重试配置
         current_config["retry_429_max_retries"] = await config.get_retry_429_max_retries()
         current_config["retry_429_enabled"] = await config.get_retry_429_enabled()
@@ -1129,6 +1132,8 @@ async def get_config(token: str = Depends(verify_token)):
         current_config["password"] = await config.get_server_password()
         
         # 检查其他环境变量锁定状态
+        if os.getenv("DAILY_RESET_HOUR"):
+            env_locked.append("daily_reset_hour")
         if os.getenv("RETRY_429_MAX_RETRIES"):
             env_locked.append("retry_429_max_retries")
         if os.getenv("RETRY_429_ENABLED"):

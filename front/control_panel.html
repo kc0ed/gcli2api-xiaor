@@ -1266,8 +1266,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     <button class="btn" style="background-color: #dc3545;"
                         onclick="resetAllUsageStats()">重置所有统计</button>
                 </div>
-                <div id="usagePeriod" class="status info" style="text-align: center; margin-top: 15px; display: none;"></div>
-
+                
                 <!-- 已删除凭证统计 -->
                 <div id="deletedStatsContainer" class="config-group" style="display: none; border-left: 4px solid #6c757d;">
                     <h4 style="cursor: pointer; user-select: none;" onclick="toggleDeletedStats()">
@@ -1774,7 +1773,8 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
 
         // 创建周期信息HTML的辅助函数
         function createCycleInfoHtml(status, type = 'manage') {
-            const resetTimestamp = status.next_reset_timestamp;
+            // 统一使用 enforcement_next_reset 作为数据源
+            const resetTimestamp = status.enforcement_next_reset || status.next_reset_timestamp;
             const startTimestamp = status.first_use_timestamp;
 
             if (resetTimestamp) {
@@ -1787,38 +1787,27 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     timeRemainingStr = ` (剩余 ${hours}h ${minutes}m)`;
                 }
 
+                const startHtml = startTimestamp ? `<span>周期开始: ${formatTime(startTimestamp)}</span><br>` : '';
+
                 if (type === 'usage') {
+                    // 使用统计页面的样式
                     return `
                         <div class="usage-info-item">
-                            <span class="usage-info-label">周期开始</span>
-                            <span class="usage-info-value">${formatTime(startTimestamp)}</span>
+                            <span class="usage-info-label" style="color: #007bff;">周期开始</span>
+                            <span class="usage-info-value">${startTimestamp ? formatTime(startTimestamp) : 'N/A'}</span>
                         </div>
                         <div class="usage-info-item">
-                            <span class="usage-info-label">周期重置</span>
-                            <span class="usage-info-value">${formatTime(resetTimestamp)}<span style="color: #007bff;">${timeRemainingStr}</span></span>
+                            <span class="usage-info-label" style="color: #007bff;">周期重置</span>
+                            <span class="usage-info-value">${formatTime(resetTimestamp)}<span style="color: #007bff; font-weight: bold;">${timeRemainingStr}</span></span>
                         </div>
                     `;
                 } else { // 'manage'
+                    // 文件管理页面的样式
                     return `
                         <div style="font-size: 11px; color: #666; margin-top: 4px;">
-                            <span>周期开始: ${formatTime(startTimestamp)}</span><br>
+                            ${startHtml}
                             <span>周期重置: ${formatTime(resetTimestamp)}</span>
-                            <span style="color: #007bff;">${timeRemainingStr}</span>
-                        </div>
-                    `;
-                }
-            } else if (status.next_reset_time) { // 仅当 state 无时间且 stats 有旧字段时回退
-                if (type === 'usage') {
-                    return `
-                        <div class="usage-info-item" style="grid-column: 1 / -1;">
-                            <span class="usage-info-label">下次重置时间</span>
-                            <span class="usage-info-value">${formatTime(status.next_reset_time)}</span>
-                        </div>
-                    `;
-                } else {
-                    return `
-                        <div style="font-size: 11px; color: #666; margin-top: 4px;">
-                            <span>下次重置时间: ${formatTime(status.next_reset_time)}</span>
+                            <span style="color: #007bff; font-weight: bold;">${timeRemainingStr}</span>
                         </div>
                     `;
                 }
@@ -3523,16 +3512,6 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
                     document.getElementById('geminiProCalls').textContent = aggregatedData.data.total_gemini_2_5_pro_calls || 0;
                     document.getElementById('totalFiles').textContent = aggregatedData.data.total_files || 0;
 
-                    // 更新并显示统计周期
-                    const usagePeriodEl = document.getElementById('usagePeriod');
-                    if (aggregatedData.data.display_period_start && aggregatedData.data.display_period_end) {
-                        const start = new Date(aggregatedData.data.display_period_start).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-                        const end = new Date(aggregatedData.data.display_period_end).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-                        usagePeriodEl.innerHTML = `<strong>当前统计周期:</strong> ${start} &mdash; ${end} (UTC+8)`;
-                        usagePeriodEl.style.display = 'block';
-                    } else {
-                        usagePeriodEl.style.display = 'none';
-                    }
 
                     // 渲染使用统计列表
                     renderUsageList();
