@@ -189,16 +189,20 @@ class CredentialManager:
                 
                 # 初始加载时只记录调试信息，运行时变化才记录INFO
                 if not is_initial_load:
-                    if added:
-                        log.info(f"发现新的可用凭证: {list(added)}")
-                    if removed:
-                        log.info(f"移除不可用凭证: {list(removed)}")
+                    log.info(f"凭证列表发生变化。新增: {list(added) if added else '无'}, 移除: {list(removed) if removed else '无'}")
+                    log.info(f"当前可用凭证列表: {self._credential_files}")
+                    # 强制重置状态，确保从新的列表中选择
+                    self._current_credential_index = 0
+                    self._current_credential_file = None
+                    self._current_credential_data = None
+                    self._call_count = 0
+                    log.info("CredentialManager 状态已重置，将从新的凭证列表开始选择。")
                 else:
                     # 初始加载时只记录调试信息
                     if available_credentials:
-                        log.debug(f"初始加载发现 {len(available_credentials)} 个可用凭证")
-                
-                # 重置当前索引如果需要
+                        log.debug(f"初始加载发现 {len(available_credentials)} 个可用凭证: {available_credentials}")
+
+                # 重置当前索引如果需要 (双重保险)
                 if self._current_credential_index >= len(self._credential_files):
                     self._current_credential_index = 0
             
@@ -270,6 +274,7 @@ class CredentialManager:
     async def get_valid_credential(self) -> Optional[Tuple[str, Dict[str, Any]]]:
         """获取有效的凭证，自动处理轮换和失效凭证切换"""
         async with self._operation_lock:
+            log.info(f"API 调用，准备获取凭证。当前索引: {self._current_credential_index}, 当前缓存文件: {self._current_credential_file}")
             if not self._credential_files:
                 await self._discover_credentials()
                 if not self._credential_files:

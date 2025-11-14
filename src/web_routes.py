@@ -38,9 +38,6 @@ from .storage_adapter import get_storage_adapter
 router = APIRouter()
 security = HTTPBearer()
 
-# 创建credential manager实例
-credential_manager = CredentialManager()
-
 # WebSocket连接管理
 
 class ConnectionManager:
@@ -116,18 +113,10 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def ensure_credential_manager_initialized():
-    """确保credential manager已初始化"""
-    if not credential_manager._initialized:
-        await credential_manager.initialize()
-
-async def get_credential_manager():
+async def get_credential_manager_instance():
     """获取全局凭证管理器实例"""
-    global credential_manager
-    if not credential_manager:
-        credential_manager = CredentialManager()
-        await credential_manager.initialize()
-    return credential_manager
+    from .credential_manager import get_credential_manager
+    return await get_credential_manager()
 
 async def authenticate(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """验证用户密码（控制面板使用）"""
@@ -632,7 +621,7 @@ async def upload_credentials(files: List[UploadFile] = File(...), token: str = D
 async def get_creds_status(token: str = Depends(verify_token)):
     """获取所有凭证文件的状态"""
     try:
-        await ensure_credential_manager_initialized()
+        credential_manager = await get_credential_manager_instance()
         
         # 获取存储适配器
         storage_adapter = await get_storage_adapter()
@@ -745,7 +734,7 @@ async def get_creds_status(token: str = Depends(verify_token)):
 async def creds_action(request: CredFileActionRequest, token: str = Depends(verify_token)):
     """对凭证文件执行操作（启用/禁用/删除）"""
     try:
-        await ensure_credential_manager_initialized()
+        credential_manager = await get_credential_manager_instance()
         
         log.info(f"Received request: {request}")
         
@@ -809,7 +798,7 @@ async def creds_action(request: CredFileActionRequest, token: str = Depends(veri
 async def creds_batch_action(request: CredFileBatchActionRequest, token: str = Depends(verify_token)):
     """批量对凭证文件执行操作（启用/禁用/删除）"""
     try:
-        await ensure_credential_manager_initialized()
+        credential_manager = await get_credential_manager_instance()
         
         action = request.action
         filenames = request.filenames
@@ -930,7 +919,7 @@ async def download_cred_file(filename: str, token: str = Depends(verify_token)):
 async def fetch_user_email(filename: str, token: str = Depends(verify_token)):
     """获取指定凭证文件的用户邮箱地址"""
     try:
-        await ensure_credential_manager_initialized()
+        credential_manager = await get_credential_manager_instance()
         
         # 标准化文件名（只保留文件名部分）
         import os
@@ -970,7 +959,7 @@ async def fetch_user_email(filename: str, token: str = Depends(verify_token)):
 async def refresh_all_user_emails(token: str = Depends(verify_token)):
     """刷新所有凭证文件的用户邮箱地址"""
     try:
-        await ensure_credential_manager_initialized()
+        credential_manager = await get_credential_manager_instance()
         
         # 获取存储适配器
         storage_adapter = await get_storage_adapter()
@@ -1065,7 +1054,7 @@ async def download_all_creds(token: str = Depends(verify_token)):
 async def get_config(token: str = Depends(verify_token)):
     """获取当前配置"""
     try:
-        await ensure_credential_manager_initialized()
+        # 获取配置不需要凭证管理器
         
         # 导入配置相关模块
         
@@ -1175,7 +1164,6 @@ async def get_config(token: str = Depends(verify_token)):
 async def save_config(request: ConfigSaveRequest, token: str = Depends(verify_token)):
     """保存配置到TOML文件"""
     try:
-        await ensure_credential_manager_initialized()
         new_config = request.config
         
         log.debug(f"收到的配置数据: {list(new_config.keys())}")
