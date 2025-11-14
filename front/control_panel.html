@@ -1747,6 +1747,7 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
             normal: 0,
             disabled: 0
         };
+        let refreshDebounceTimer = null;
 
         function showStatus(message, type = 'info') {
             console.log('showStatus called:', message, type);
@@ -2801,7 +2802,23 @@ docker run -e GCLI_CREDS_1='{"client_id":"..."}' \
 
                 if (response.ok) {
                     showStatus(data.message, 'success');
-                    await refreshCredsStatus(); // 刷新状态
+                    
+                    // 视觉上立即更新卡片状态
+                    const card = document.querySelector(`.cred-card [data-filename="${filename}"]`).closest('.cred-card');
+                    if (card) {
+                        if (action === 'enable') {
+                            card.classList.remove('disabled');
+                        } else if (action === 'disable') {
+                            card.classList.add('disabled');
+                        }
+                    }
+
+                    // 使用防抖延迟刷新整个列表
+                    clearTimeout(refreshDebounceTimer);
+                    refreshDebounceTimer = setTimeout(() => {
+                        refreshCredsStatus();
+                    }, 3000); // 3秒延迟
+
                 } else {
                     showStatus(`操作失败: ${data.detail || data.error || '未知错误'}`, 'error');
                 }

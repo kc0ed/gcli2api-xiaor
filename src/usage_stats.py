@@ -333,8 +333,10 @@ class UsageStats:
             else:
                 # Return all statistics
                 all_stats = {}
-                # Create a copy of keys to avoid runtime errors during async operations
-                for fname in list(self._stats_cache.keys()):
+                # 实时从存储适配器获取完整的凭证列表，确保新文件能被统计到
+                all_filenames = await self._storage_adapter.list_credentials()
+                
+                for fname in all_filenames:
                     stats = self._get_or_create_stats(fname)
                     state = await self._storage_adapter.get_credential_state(fname)
                     stats.update(state)

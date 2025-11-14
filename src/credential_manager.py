@@ -380,11 +380,13 @@ class CredentialManager:
             success = await self.update_credential_state(credential_name, state_updates)
             
             if success:
-                # 如果禁用了当前正在使用的凭证，需要重新发现可用凭证
-                if disabled and credential_name == self._current_credential_file:
-                    await self._discover_credentials()
-                    if self._credential_files:
-                        await self._rotate_credential()
+                # 只要凭证的禁用/启用状态发生变化，就立即重新发现可用凭证
+                # 这是为了确保内部的可用列表 (_credential_files) 总是最新的
+                await self._discover_credentials()
+                
+                # 如果禁用了当前正在使用的凭证，额外执行一次轮换
+                if disabled and credential_name == self._current_credential_file and self._credential_files:
+                    await self._rotate_credential()
                 
                 action = "disabled" if disabled else "enabled"
                 log.info(f"Credential {action}: {credential_name}")
@@ -503,15 +505,16 @@ class CredentialManager:
             success = await self.update_credential_state(credential_name, state_updates)
             
             if success:
-                action = "marked as rate-limited" if is_limited else "cleared from rate-limit"
-                log.info(f"Credential {credential_name} {action}.")
+                if is_limited:
+                    log.warning(f"[429 Rate Limit] 凭证 {credential_name} 已被限流，将自动切换。")
+                else:
+                    log.info(f"Credential {credential_name} cleared from rate-limit.")
                 
                 # 立即刷新可用凭证列表
                 await self._discover_credentials()
                 
                 # 如果是当前凭证被限制，立即轮换
                 if is_limited and credential_name == self._current_credential_file:
-                    log.info(f"Current credential {credential_name} is rate-limited, forcing rotation.")
                     await self.force_rotate_credential()
             
             return success
